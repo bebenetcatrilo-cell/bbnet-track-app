@@ -44,6 +44,17 @@ class MiTareaRastreo extends TaskHandler {
   String? _companyId;
   int _enviadas = 0;
 
+  // --- Para el filtro de calidad del GPS ---
+  double? _ultLat;        // última latitud buena enviada
+  double? _ultLon;        // última longitud buena enviada
+  DateTime? _ultHora;     // hora de la última posición buena
+  int _lecturas = 0;      // cuántas lecturas llevamos (para ignorar el arranque)
+
+  // Configuración del filtro:
+  static const double _precisionMaxMetros = 50;   // descarta si el GPS tiene más error que esto
+  static const double _velocidadMaxKmh = 150;     // descarta saltos imposibles (auto/camioneta)
+  static const int _lecturasIgnorarInicio = 2;    // ignora las primeras 2 (arranque en frío)
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     // Al arrancar el servicio, leemos los datos guardados (device, empresa)
@@ -60,6 +71,37 @@ class MiTareaRastreo extends TaskHandler {
         desiredAccuracy: LocationAccuracy.high,
       );
 
+      _lecturas++;
+
+      // ---- FILTROS DE CALIDAD ----
+
+      // Filtro 1: ignorar las primeras lecturas (arranque en frío del GPS)
+      if (_lecturas <= _lecturasIgnorarInicio) {
+        FlutterForegroundTask.updateService(
+          notificationTitle: 'BBNet Track · Buscando señal',
+          notificationText: 'Enganchando el GPS...',
+        );
+        return;
+      }
+
+      // Filtro 2: descartar posiciones imprecisas (mucho error de GPS)
+      if (pos.accuracy > _precisionMaxMetros) {
+        return; // posición poco confiable, la descartamos
+      }
+
+      // Filtro 3: descartar saltos imposibles (velocidad irreal entre 2 puntos)
+      if (_ultLat != null && _ultLon != null && _ultHora != null) {
+        final metros = Geolocator.distanceBetween(_ultLat!, _ultLon!, pos.latitude, pos.longitude);
+        final segundos = DateTime.now().difference(_ultHora!).inSeconds;
+        if (segundos > 0) {
+          final kmh = (metros / segundos) * 3.6;
+          if (kmh > _velocidadMaxKmh) {
+            return; // salto imposible, es un error de GPS, lo descartamos
+          }
+        }
+      }
+
+      // ---- La posición pasó los filtros: la enviamos ----
       await supabase.from('locations').insert({
         'company_id': _companyId,
         'device_id': _deviceId,
@@ -75,8 +117,12 @@ class MiTareaRastreo extends TaskHandler {
         'ultima_conexion': DateTime.now().toUtc().toIso8601String(),
       }).eq('id', _deviceId!);
 
+      // Guardamos esta posición como la última buena (para el filtro de saltos)
+      _ultLat = pos.latitude;
+      _ultLon = pos.longitude;
+      _ultHora = DateTime.now();
       _enviadas++;
-      // Actualizamos el texto de la notificación
+
       FlutterForegroundTask.updateService(
         notificationTitle: 'BBNet Track · Rastreando',
         notificationText: 'Posiciones enviadas: $_enviadas',
