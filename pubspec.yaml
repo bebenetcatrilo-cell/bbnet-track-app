@@ -16,7 +16,7 @@ dependencies:
   # Pedir permisos al celular
   permission_handler: ^11.3.0
   # Rastreo en segundo plano (pantalla apagada / app cerrada)
-  flutter_foreground_task: ^8.10.0
+  flutter_foreground_task: 8.17.0
 
 flutter:
   uses-material-design: true

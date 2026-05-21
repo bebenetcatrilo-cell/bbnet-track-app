@@ -61,6 +61,21 @@ class MiTareaRastreo extends TaskHandler {
     _deviceId = await FlutterForegroundTask.getData<String>(key: 'deviceId');
     _vehicleId = await FlutterForegroundTask.getData<String>(key: 'vehicleId');
     _companyId = await FlutterForegroundTask.getData<String>(key: 'companyId');
+
+    // CLAVE: el cerebro del segundo plano corre en un espacio AISLADO,
+    // donde Supabase NO está inicializado. Lo inicializamos acá, y
+    // recuperamos la sesión con el token guardado, para poder enviar datos.
+    try {
+      await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+    } catch (_) {
+      // Si ya estaba inicializado, ignoramos el error
+    }
+    final sessionString = await FlutterForegroundTask.getData<String>(key: 'sessionString');
+    if (sessionString != null && sessionString.isNotEmpty) {
+      try {
+        await Supabase.instance.client.auth.recoverSession(sessionString);
+      } catch (_) {}
+    }
   }
 
   // Esto se ejecuta cada X segundos (lo configuramos al arrancar)
@@ -102,7 +117,9 @@ class MiTareaRastreo extends TaskHandler {
       }
 
       // ---- La posición pasó los filtros: la enviamos ----
-      await supabase.from('locations').insert({
+      // Usamos Supabase.instance.client (inicializado en onStart para este espacio)
+      final sb = Supabase.instance.client;
+      await sb.from('locations').insert({
         'company_id': _companyId,
         'device_id': _deviceId,
         'vehicle_id': _vehicleId,
@@ -112,7 +129,7 @@ class MiTareaRastreo extends TaskHandler {
         'fecha_gps': DateTime.now().toUtc().toIso8601String(),
       });
 
-      await supabase.from('tracker_devices').update({
+      await sb.from('tracker_devices').update({
         'online': true,
         'ultima_conexion': DateTime.now().toUtc().toIso8601String(),
       }).eq('id', _deviceId!);
@@ -128,9 +145,11 @@ class MiTareaRastreo extends TaskHandler {
         notificationText: 'Posiciones enviadas: $_enviadas',
       );
     } catch (e) {
+      // Mostramos el error REAL (recortado) para poder diagnosticar
+      final msg = e.toString();
       FlutterForegroundTask.updateService(
-        notificationTitle: 'BBNet Track · Reintentando',
-        notificationText: 'Sin conexión, reintentando...',
+        notificationTitle: 'BBNet Track · Error',
+        notificationText: msg.length > 80 ? msg.substring(0, 80) : msg,
       );
     }
   }
@@ -139,7 +158,9 @@ class MiTareaRastreo extends TaskHandler {
   Future<void> onDestroy(DateTime timestamp) async {
     // Al detener, marcamos el dispositivo como offline
     if (_deviceId != null) {
-      await supabase.from('tracker_devices').update({'online': false}).eq('id', _deviceId!);
+      try {
+        await Supabase.instance.client.from('tracker_devices').update({'online': false}).eq('id', _deviceId!);
+      } catch (_) {}
     }
   }
 }
@@ -429,6 +450,12 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
     await FlutterForegroundTask.saveData(key: 'deviceId', value: _deviceId!);
     await FlutterForegroundTask.saveData(key: 'vehicleId', value: _vehicleId ?? '');
     await FlutterForegroundTask.saveData(key: 'companyId', value: _companyId!);
+    // Guardamos la sesión completa para que el cerebro del segundo plano
+    // pueda autenticarse con Supabase en su espacio aislado.
+    final sesion = supabase.auth.currentSession;
+    if (sesion != null) {
+      await FlutterForegroundTask.saveData(key: 'sessionString', value: sesion.persistSessionString);
+    }
 
     await FlutterForegroundTask.startService(
       notificationTitle: 'BBNet Track · Rastreando',
