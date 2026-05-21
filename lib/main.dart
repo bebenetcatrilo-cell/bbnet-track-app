@@ -1,33 +1,106 @@
 // ============================================================================
-// BBNET TRACK · APP DE RASTREO · main.dart  (ETAPA 1)
+// BBNET TRACK · APP DE RASTREO · main.dart  (ETAPA 2 · segundo plano)
 // ----------------------------------------------------------------------------
-// Lo que hace esta app:
-//   1) Pantalla de login (el técnico entra con su mail y contraseña)
-//   2) Pide permiso de ubicación al celular
-//   3) Lee la posición GPS real cada pocos segundos
-//   4) La manda a Supabase (la misma base que usa el panel)
-//
-// Cuando esto anda, en el panel (Mapa en vivo) se ve el celular moverse.
+// Ahora la app rastrea AUNQUE la pantalla esté apagada o uses otras apps.
+// Para eso usa un "servicio en segundo plano" que muestra una notificación
+// permanente mientras rastrea (Android lo exige).
 // ============================================================================
 
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:permission_handler/permission_handler.dart';
 
-// ----------------------------------------------------------------------------
-// DATOS DE TU SUPABASE (los mismos del panel)
-// ----------------------------------------------------------------------------
 const supabaseUrl = 'https://ejvrvhdlweivrexcrivf.supabase.co';
 const supabaseAnonKey = 'sb_publishable_45nRA6haYBUpJNEzbAYObQ_fyjxO5Cm';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  // Preparar el comunicador con el servicio en segundo plano
+  FlutterForegroundTask.initCommunicationPort();
   runApp(const MiApp());
 }
 
 final supabase = Supabase.instance.client;
+
+// ============================================================================
+// EL "CEREBRO" DEL SEGUNDO PLANO
+// ----------------------------------------------------------------------------
+// Esta clase corre en segundo plano. Cada cierto tiempo lee el GPS y manda
+// la posición a Supabase, aunque la app esté minimizada o la pantalla apagada.
+// ============================================================================
+
+@pragma('vm:entry-point')
+void iniciarCallback() {
+  FlutterForegroundTask.setTaskHandler(MiTareaRastreo());
+}
+
+class MiTareaRastreo extends TaskHandler {
+  String? _deviceId;
+  String? _vehicleId;
+  String? _companyId;
+  int _enviadas = 0;
+
+  @override
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    // Al arrancar el servicio, leemos los datos guardados (device, empresa)
+    _deviceId = await FlutterForegroundTask.getData<String>(key: 'deviceId');
+    _vehicleId = await FlutterForegroundTask.getData<String>(key: 'vehicleId');
+    _companyId = await FlutterForegroundTask.getData<String>(key: 'companyId');
+  }
+
+  // Esto se ejecuta cada X segundos (lo configuramos al arrancar)
+  @override
+  Future<void> onRepeatEvent(DateTime timestamp) async {
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+
+      await supabase.from('locations').insert({
+        'company_id': _companyId,
+        'device_id': _deviceId,
+        'vehicle_id': _vehicleId,
+        'latitud': pos.latitude,
+        'longitud': pos.longitude,
+        'velocidad': (pos.speed * 3.6).clamp(0, 300),
+        'fecha_gps': DateTime.now().toUtc().toIso8601String(),
+      });
+
+      await supabase.from('tracker_devices').update({
+        'online': true,
+        'ultima_conexion': DateTime.now().toUtc().toIso8601String(),
+      }).eq('id', _deviceId!);
+
+      _enviadas++;
+      // Actualizamos el texto de la notificación
+      FlutterForegroundTask.updateService(
+        notificationTitle: 'BBNet Track · Rastreando',
+        notificationText: 'Posiciones enviadas: $_enviadas',
+      );
+    } catch (e) {
+      FlutterForegroundTask.updateService(
+        notificationTitle: 'BBNet Track · Reintentando',
+        notificationText: 'Sin conexión, reintentando...',
+      );
+    }
+  }
+
+  @override
+  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
+    // Al detener, marcamos el dispositivo como offline
+    if (_deviceId != null) {
+      await supabase.from('tracker_devices').update({'online': false}).eq('id', _deviceId!);
+    }
+  }
+}
+
+// ============================================================================
+// LA APP (interfaz)
+// ============================================================================
 
 class MiApp extends StatelessWidget {
   const MiApp({super.key});
@@ -45,7 +118,6 @@ class MiApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      // Si ya hay sesión abierta, va directo al panel; sino, al login
       home: supabase.auth.currentSession == null
           ? const PantallaLogin()
           : const PantallaRastreo(),
@@ -53,12 +125,11 @@ class MiApp extends StatelessWidget {
   }
 }
 
-// ============================================================================
-// PANTALLA DE LOGIN
-// ============================================================================
+// ---------------------------------------------------------------------------
+// LOGIN (igual que antes)
+// ---------------------------------------------------------------------------
 class PantallaLogin extends StatefulWidget {
   const PantallaLogin({super.key});
-
   @override
   State<PantallaLogin> createState() => _PantallaLoginState();
 }
@@ -98,7 +169,6 @@ class _PantallaLoginState extends State<PantallaLogin> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Logo
               Container(
                 width: 64, height: 64,
                 margin: const EdgeInsets.only(bottom: 20),
@@ -116,7 +186,6 @@ class _PantallaLoginState extends State<PantallaLogin> {
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 14, color: Color(0xFF8a93a6))),
               const SizedBox(height: 30),
-
               TextField(
                 controller: _emailCtrl,
                 keyboardType: TextInputType.emailAddress,
@@ -130,12 +199,10 @@ class _PantallaLoginState extends State<PantallaLogin> {
                 style: const TextStyle(color: Colors.white),
                 decoration: _decoracion('Contraseña'),
               ),
-
               if (_error != null) ...[
                 const SizedBox(height: 16),
                 Text(_error!, style: const TextStyle(color: Color(0xFFff4d5e), fontSize: 13)),
               ],
-
               const SizedBox(height: 24),
               FilledButton(
                 onPressed: _cargando ? null : _entrar,
@@ -171,50 +238,64 @@ class _PantallaLoginState extends State<PantallaLogin> {
   }
 }
 
-// ============================================================================
-// PANTALLA DE RASTREO (después del login)
-// ============================================================================
+// ---------------------------------------------------------------------------
+// PANTALLA DE RASTREO (ahora arranca el servicio en segundo plano)
+// ---------------------------------------------------------------------------
 class PantallaRastreo extends StatefulWidget {
   const PantallaRastreo({super.key});
-
   @override
   State<PantallaRastreo> createState() => _PantallaRastreoState();
 }
 
 class _PantallaRastreoState extends State<PantallaRastreo> {
   bool _rastreando = false;
-  String _estado = 'Listo para empezar';
-  int _enviadas = 0;
-  Position? _ultima;
-  StreamSubscription<Position>? _suscripcion;
+  String _estado = 'Preparando...';
   String? _deviceId;
   String? _vehicleId;
+  String? _companyId;
 
   @override
   void initState() {
     super.initState();
+    _configurarServicio();
     _prepararDispositivo();
+    _chequearSiYaEstaCorriendo();
   }
 
-  // Busca el dispositivo y vehículo de este usuario para saber a quién asociar
+  void _configurarServicio() {
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'bbnet_track_canal',
+        channelName: 'BBNet Track Rastreo',
+        channelDescription: 'Notificación mientras se rastrea la ubicación',
+        channelImportance: NotificationChannelImportance.LOW,
+        priority: NotificationPriority.LOW,
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(),
+      foregroundTaskOptions: ForegroundTaskOptions(
+        eventAction: ForegroundTaskEventAction.repeat(10000), // cada 10 segundos
+        autoRunOnBoot: false,
+        allowWakeLock: true,
+        allowWifiLock: true,
+      ),
+    );
+  }
+
+  Future<void> _chequearSiYaEstaCorriendo() async {
+    final corriendo = await FlutterForegroundTask.isRunningService;
+    if (mounted) setState(() => _rastreando = corriendo);
+  }
+
   Future<void> _prepararDispositivo() async {
     final userId = supabase.auth.currentUser?.id;
     if (userId == null) return;
 
-    // Buscamos el perfil del usuario (su empresa)
-    final perfil = await supabase
-        .from('users')
-        .select('company_id')
-        .eq('id', userId)
-        .maybeSingle();
-
+    final perfil = await supabase.from('users').select('company_id').eq('id', userId).maybeSingle();
     if (perfil == null) {
       setState(() => _estado = 'No se encontró tu perfil');
       return;
     }
 
-    // Buscamos un dispositivo de tipo celular de esta empresa.
-    // (En la Etapa 1, usamos el primero que haya. Después se puede elegir.)
     final disp = await supabase
         .from('tracker_devices')
         .select('id, vehicle_id')
@@ -224,20 +305,21 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
         .maybeSingle();
 
     if (disp == null) {
-      setState(() => _estado = 'No hay un dispositivo celular cargado en el sistema.\nPedile al administrador que cree uno.');
+      setState(() => _estado = 'No hay un dispositivo celular cargado en el sistema.');
       return;
     }
 
     setState(() {
+      _companyId = perfil['company_id'] as String;
       _deviceId = disp['id'] as String;
       _vehicleId = disp['vehicle_id'] as String?;
-      _estado = 'Listo para empezar';
+      _estado = _rastreando ? 'Rastreando en segundo plano' : 'Listo para empezar';
     });
   }
 
-  Future<void> _alternarRastreo() async {
+  Future<void> _alternar() async {
     if (_rastreando) {
-      _detener();
+      await _detener();
     } else {
       await _empezar();
     }
@@ -249,86 +331,59 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
       return;
     }
 
-    // 1) Pedir permiso de ubicación
+    // 1) Permiso de ubicación normal
     LocationPermission permiso = await Geolocator.checkPermission();
     if (permiso == LocationPermission.denied) {
       permiso = await Geolocator.requestPermission();
     }
     if (permiso == LocationPermission.denied || permiso == LocationPermission.deniedForever) {
-      setState(() => _estado = 'Necesito permiso de ubicación para funcionar.');
+      setState(() => _estado = 'Necesito permiso de ubicación.');
       return;
     }
 
-    // 2) Chequear que el GPS esté prendido
-    final servicioActivo = await Geolocator.isLocationServiceEnabled();
-    if (!servicioActivo) {
-      setState(() => _estado = 'Prendé la ubicación (GPS) del celular.');
-      return;
+    // 2) Permiso de ubicación EN SEGUNDO PLANO (clave para esta etapa)
+    if (permiso == LocationPermission.whileInUse) {
+      // Pedimos el permiso de "siempre" (segundo plano)
+      await Permission.locationAlways.request();
     }
 
-    // 3) Empezar a escuchar la posición y mandarla
-    setState(() { _rastreando = true; _estado = 'Rastreando...'; });
+    // 3) Permiso de notificaciones (Android 13+)
+    await Permission.notification.request();
 
-    _suscripcion = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 10, // manda cada 10 metros de movimiento
-      ),
-    ).listen((pos) => _enviarPosicion(pos));
+    // 4) Pedir que ignore el ahorro de batería (ayuda a que no mate la app)
+    final batteryOk = await FlutterForegroundTask.isIgnoringBatteryOptimizations;
+    if (!batteryOk) {
+      await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+    }
+
+    // 5) Guardar los datos para que el servicio los use
+    await FlutterForegroundTask.saveData(key: 'deviceId', value: _deviceId!);
+    await FlutterForegroundTask.saveData(key: 'vehicleId', value: _vehicleId ?? '');
+    await FlutterForegroundTask.saveData(key: 'companyId', value: _companyId!);
+
+    // 6) Arrancar el servicio en segundo plano
+    await FlutterForegroundTask.startService(
+      notificationTitle: 'BBNet Track · Rastreando',
+      notificationText: 'Tu ubicación se está registrando',
+      callback: iniciarCallback,
+    );
+
+    setState(() { _rastreando = true; _estado = 'Rastreando en segundo plano'; });
   }
 
-  void _detener() {
-    _suscripcion?.cancel();
-    _suscripcion = null;
+  Future<void> _detener() async {
+    await FlutterForegroundTask.stopService();
     setState(() { _rastreando = false; _estado = 'Detenido'; });
   }
 
-  // Manda una posición a Supabase
-  Future<void> _enviarPosicion(Position pos) async {
-    try {
-      final userId = supabase.auth.currentUser?.id;
-      final perfil = await supabase.from('users').select('company_id').eq('id', userId!).single();
-
-      await supabase.from('locations').insert({
-        'company_id': perfil['company_id'],
-        'device_id': _deviceId,
-        'vehicle_id': _vehicleId,
-        'latitud': pos.latitude,
-        'longitud': pos.longitude,
-        'velocidad': (pos.speed * 3.6).clamp(0, 300), // m/s a km/h
-        'fecha_gps': DateTime.now().toUtc().toIso8601String(),
-      });
-
-      // Actualizamos el dispositivo (online + última conexión)
-      await supabase.from('tracker_devices').update({
-        'online': true,
-        'ultima_conexion': DateTime.now().toUtc().toIso8601String(),
-      }).eq('id', _deviceId!);
-
-      setState(() {
-        _ultima = pos;
-        _enviadas++;
-        _estado = 'Rastreando...';
-      });
-    } catch (e) {
-      setState(() => _estado = 'Error al enviar: revisá la conexión');
-    }
-  }
-
   Future<void> _salir() async {
-    _detener();
+    await _detener();
     await supabase.auth.signOut();
     if (mounted) {
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const PantallaLogin()),
       );
     }
-  }
-
-  @override
-  void dispose() {
-    _suscripcion?.cancel();
-    super.dispose();
   }
 
   @override
@@ -347,7 +402,6 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Círculo de estado
             Center(
               child: Container(
                 width: 160, height: 160,
@@ -367,26 +421,17 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
               ),
             ),
             const SizedBox(height: 28),
-
             Text(_estado,
               textAlign: TextAlign.center,
               style: const TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.w500)),
             const SizedBox(height: 8),
-
-            if (_rastreando) ...[
-              Text('Posiciones enviadas: $_enviadas',
+            if (_rastreando)
+              const Text('Podés apagar la pantalla o usar otras apps.\nEl rastreo sigue funcionando.',
                 textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 14, color: Color(0xFF8a93a6))),
-              if (_ultima != null)
-                Text('Última: ${_ultima!.latitude.toStringAsFixed(5)}, ${_ultima!.longitude.toStringAsFixed(5)}',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 12, color: Color(0xFF5a6478))),
-            ],
-
+                style: TextStyle(fontSize: 13, color: Color(0xFF8a93a6))),
             const SizedBox(height: 36),
-
             FilledButton(
-              onPressed: _alternarRastreo,
+              onPressed: _alternar,
               style: FilledButton.styleFrom(
                 backgroundColor: _rastreando ? const Color(0xFFff4d5e) : const Color(0xFF0066ff),
                 padding: const EdgeInsets.symmetric(vertical: 18),
