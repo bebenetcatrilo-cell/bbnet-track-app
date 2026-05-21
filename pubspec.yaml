@@ -1,0 +1,20 @@
+name: bbnet_track_app
+description: App de rastreo GPS para BBNet Track
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Conexión con Supabase (el mismo backend que el panel)
+  supabase_flutter: ^2.5.0
+  # Leer la ubicación GPS del celular
+  geolocator: ^12.0.0
+  # Pedir permisos al celular
+  permission_handler: ^11.3.0
+
+flutter:
+  uses-material-design: true

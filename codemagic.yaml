@@ -1,0 +1,38 @@
+# ============================================================================
+# CONFIGURACIÓN DE CODEMAGIC · construye el APK de BBNet Track en la nube
+# ----------------------------------------------------------------------------
+# MÉTODO: Flutter genera la estructura técnica de Android automáticamente
+# (siempre al día y coherente), y nosotros encima ponemos lo nuestro:
+# el código (lib/), las librerías (pubspec.yaml) y los permisos.
+#
+# Así evitamos los líos de versiones de Gradle/Kotlin/SDK.
+# ============================================================================
+
+workflows:
+  android-workflow:
+    name: BBNet Track Android
+    max_build_duration: 60
+    environment:
+      flutter: stable
+    scripts:
+      - name: Generar la estructura base de Android (la parte técnica)
+        script: |
+          # Flutter crea toda la estructura técnica al día en una carpeta temporal
+          cd ..
+          flutter create --org com.bbnet --project-name bbnet_track_app base_temporal
+          # Copiamos NUESTROS archivos encima de la base generada
+          cp -r $CM_BUILD_DIR/lib/* base_temporal/lib/
+          cp $CM_BUILD_DIR/pubspec.yaml base_temporal/pubspec.yaml
+          # Copiamos nuestro AndroidManifest (con los permisos de GPS)
+          cp $CM_BUILD_DIR/android/app/src/main/AndroidManifest.xml base_temporal/android/app/src/main/AndroidManifest.xml
+      - name: Bajar las librerías
+        script: |
+          cd ../base_temporal
+          flutter pub get
+      - name: Construir el APK
+        script: |
+          cd ../base_temporal
+          flutter build apk --release
+    artifacts:
+      # El APK queda listo para descargar al terminar
+      - ../base_temporal/build/**/outputs/**/*.apk
