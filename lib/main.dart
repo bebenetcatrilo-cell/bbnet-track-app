@@ -7,6 +7,7 @@
 // ============================================================================
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:geolocator/geolocator.dart';
@@ -116,10 +117,9 @@ class MiTareaRastreo extends TaskHandler {
         }
       }
 
-      // ---- La posición pasó los filtros: la enviamos ----
-      // Usamos Supabase.instance.client (inicializado en onStart para este espacio)
-      final sb = Supabase.instance.client;
-      await sb.from('locations').insert({
+      // ---- La posición pasó los filtros ----
+      // Armamos el registro de esta posición
+      final registro = {
         'company_id': _companyId,
         'device_id': _deviceId,
         'vehicle_id': _vehicleId,
@@ -127,31 +127,83 @@ class MiTareaRastreo extends TaskHandler {
         'longitud': pos.longitude,
         'velocidad': (pos.speed * 3.6).clamp(0, 300),
         'fecha_gps': DateTime.now().toUtc().toIso8601String(),
-      });
-
-      await sb.from('tracker_devices').update({
-        'online': true,
-        'ultima_conexion': DateTime.now().toUtc().toIso8601String(),
-      }).eq('id', _deviceId!);
+      };
 
       // Guardamos esta posición como la última buena (para el filtro de saltos)
       _ultLat = pos.latitude;
       _ultLon = pos.longitude;
       _ultHora = DateTime.now();
-      _enviadas++;
 
-      FlutterForegroundTask.updateService(
-        notificationTitle: 'BBNet Track · Rastreando',
-        notificationText: 'Posiciones enviadas: $_enviadas',
-      );
+      final sb = Supabase.instance.client;
+
+      try {
+        // Intentamos mandar PRIMERO lo que haya pendiente (cola offline)
+        await _enviarPendientes(sb);
+
+        // Después mandamos la posición actual
+        await sb.from('locations').insert(registro);
+        await sb.from('tracker_devices').update({
+          'online': true,
+          'ultima_conexion': DateTime.now().toUtc().toIso8601String(),
+        }).eq('id', _deviceId!);
+
+        _enviadas++;
+        FlutterForegroundTask.updateService(
+          notificationTitle: 'BBNet Track · Rastreando',
+          notificationText: 'Posiciones enviadas: $_enviadas',
+        );
+      } catch (e) {
+        // No hay conexión: guardamos la posición en la cola offline
+        await _guardarEnCola(registro);
+        final pendientes = await _contarPendientes();
+        FlutterForegroundTask.updateService(
+          notificationTitle: 'BBNet Track · Sin señal',
+          notificationText: 'Guardando offline ($pendientes pendientes)',
+        );
+      }
     } catch (e) {
-      // Mostramos el error REAL (recortado) para poder diagnosticar
+      // Error al leer el GPS u otro: lo mostramos
       final msg = e.toString();
       FlutterForegroundTask.updateService(
         notificationTitle: 'BBNet Track · Error',
         notificationText: msg.length > 80 ? msg.substring(0, 80) : msg,
       );
     }
+  }
+
+  // -------------------------------------------------------------------
+  // COLA OFFLINE · guarda posiciones cuando no hay internet
+  // -------------------------------------------------------------------
+
+  // Guarda un registro en la cola (lista de espera) local
+  Future<void> _guardarEnCola(Map<String, dynamic> registro) async {
+    final actual = await FlutterForegroundTask.getData<String>(key: 'colaOffline') ?? '[]';
+    final List lista = jsonDecode(actual);
+    lista.add(registro);
+    // Límite de seguridad: máximo 5000 posiciones guardadas (no llenar el celular)
+    if (lista.length > 5000) lista.removeAt(0);
+    await FlutterForegroundTask.saveData(key: 'colaOffline', value: jsonEncode(lista));
+  }
+
+  // Cuenta cuántas posiciones hay esperando
+  Future<int> _contarPendientes() async {
+    final actual = await FlutterForegroundTask.getData<String>(key: 'colaOffline') ?? '[]';
+    final List lista = jsonDecode(actual);
+    return lista.length;
+  }
+
+  // Intenta enviar todas las posiciones pendientes (cuando vuelve internet)
+  Future<void> _enviarPendientes(SupabaseClient sb) async {
+    final actual = await FlutterForegroundTask.getData<String>(key: 'colaOffline') ?? '[]';
+    final List lista = jsonDecode(actual);
+    if (lista.isEmpty) return;
+
+    // Mandamos todas juntas (en orden). Si falla, queda para el próximo intento.
+    await sb.from('locations').insert(List<Map<String, dynamic>>.from(lista));
+
+    // Si llegó acá, se enviaron bien: limpiamos la cola
+    await FlutterForegroundTask.saveData(key: 'colaOffline', value: '[]');
+    _enviadas += lista.length;
   }
 
   @override
