@@ -136,7 +136,7 @@ class MiTareaRastreo extends TaskHandler {
   }
 
   @override
-  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
+  Future<void> onDestroy(DateTime timestamp) async {
     // Al detener, marcamos el dispositivo como offline
     if (_deviceId != null) {
       await supabase.from('tracker_devices').update({'online': false}).eq('id', _deviceId!);
