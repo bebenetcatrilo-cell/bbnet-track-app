@@ -377,44 +377,66 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
       return;
     }
 
-    // 1) Permiso de ubicación normal
-    LocationPermission permiso = await Geolocator.checkPermission();
-    if (permiso == LocationPermission.denied) {
-      permiso = await Geolocator.requestPermission();
+    // -------------------------------------------------------------------
+    // PERMISOS · en el orden correcto que Android exige
+    // -------------------------------------------------------------------
+
+    // PASO 1: Notificaciones primero (Android 13+). Sin esto el servicio no vive.
+    if (await Permission.notification.isDenied) {
+      setState(() => _estado = 'Pidiendo permiso de notificaciones...');
+      await Permission.notification.request();
     }
-    if (permiso == LocationPermission.denied || permiso == LocationPermission.deniedForever) {
-      setState(() => _estado = 'Necesito permiso de ubicación.');
+
+    // PASO 2: Ubicación básica ("mientras uso la app")
+    var permisoUbic = await Permission.locationWhenInUse.status;
+    if (!permisoUbic.isGranted) {
+      setState(() => _estado = 'Pidiendo permiso de ubicación...');
+      permisoUbic = await Permission.locationWhenInUse.request();
+    }
+    if (!permisoUbic.isGranted) {
+      setState(() => _estado = '⚠️ Necesito el permiso de ubicación para funcionar.');
       return;
     }
 
-    // 2) Permiso de ubicación EN SEGUNDO PLANO (clave para esta etapa)
-    if (permiso == LocationPermission.whileInUse) {
-      // Pedimos el permiso de "siempre" (segundo plano)
-      await Permission.locationAlways.request();
+    // PASO 3: Ubicación EN SEGUNDO PLANO ("todo el tiempo") — la clave
+    var permisoSiempre = await Permission.locationAlways.status;
+    if (!permisoSiempre.isGranted) {
+      setState(() => _estado = 'Pidiendo ubicación en segundo plano...');
+      permisoSiempre = await Permission.locationAlways.request();
     }
 
-    // 3) Permiso de notificaciones (Android 13+)
-    await Permission.notification.request();
+    // Si Android no lo concede directo, hay que activarlo a mano en Ajustes.
+    // Le abrimos la pantalla de ajustes de la app y le explicamos qué hacer.
+    if (!permisoSiempre.isGranted) {
+      setState(() => _estado =
+          '⚠️ Para rastrear con la pantalla apagada:\n'
+          'Abrí los ajustes (se abren solos) → Permisos → Ubicación → '
+          'elegí "Permitir todo el tiempo". Después volvé y tocá Empezar de nuevo.');
+      await Future.delayed(const Duration(seconds: 1));
+      await openAppSettings(); // abre los ajustes de la app
+      return; // que el usuario active y vuelva a tocar Empezar
+    }
 
-    // 4) Pedir que ignore el ahorro de batería (ayuda a que no mate la app)
-    final batteryOk = await FlutterForegroundTask.isIgnoringBatteryOptimizations;
-    if (!batteryOk) {
+    // PASO 4: Ignorar el ahorro de batería (ayuda a que Android no la mate)
+    if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
+      setState(() => _estado = 'Pidiendo permiso de batería...');
       await FlutterForegroundTask.requestIgnoreBatteryOptimization();
     }
 
-    // 5) Guardar los datos para que el servicio los use
+    // -------------------------------------------------------------------
+    // Todos los permisos OK: arrancamos el servicio
+    // -------------------------------------------------------------------
     await FlutterForegroundTask.saveData(key: 'deviceId', value: _deviceId!);
     await FlutterForegroundTask.saveData(key: 'vehicleId', value: _vehicleId ?? '');
     await FlutterForegroundTask.saveData(key: 'companyId', value: _companyId!);
 
-    // 6) Arrancar el servicio en segundo plano
     await FlutterForegroundTask.startService(
       notificationTitle: 'BBNet Track · Rastreando',
       notificationText: 'Tu ubicación se está registrando',
       callback: iniciarCallback,
     );
 
-    setState(() { _rastreando = true; _estado = 'Rastreando en segundo plano'; });
+    setState(() { _rastreando = true; _estado = '✅ Rastreando en segundo plano'; });
   }
 
   Future<void> _detener() async {
