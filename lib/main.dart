@@ -70,10 +70,10 @@ class MiTareaRastreo extends TaskHandler {
     } catch (_) {
       // Si ya estaba inicializado, ignoramos el error
     }
-    final sessionString = await FlutterForegroundTask.getData<String>(key: 'sessionString');
-    if (sessionString != null && sessionString.isNotEmpty) {
+    final refreshToken = await FlutterForegroundTask.getData<String>(key: 'refreshToken');
+    if (refreshToken != null && refreshToken.isNotEmpty) {
       try {
-        await Supabase.instance.client.auth.recoverSession(sessionString);
+        await Supabase.instance.client.auth.setSession(refreshToken);
       } catch (_) {}
     }
   }
@@ -450,11 +450,11 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
     await FlutterForegroundTask.saveData(key: 'deviceId', value: _deviceId!);
     await FlutterForegroundTask.saveData(key: 'vehicleId', value: _vehicleId ?? '');
     await FlutterForegroundTask.saveData(key: 'companyId', value: _companyId!);
-    // Guardamos la sesión completa para que el cerebro del segundo plano
+    // Guardamos el refresh token para que el cerebro del segundo plano
     // pueda autenticarse con Supabase en su espacio aislado.
     final sesion = supabase.auth.currentSession;
-    if (sesion != null) {
-      await FlutterForegroundTask.saveData(key: 'sessionString', value: sesion.persistSessionString);
+    if (sesion != null && sesion.refreshToken != null) {
+      await FlutterForegroundTask.saveData(key: 'refreshToken', value: sesion.refreshToken!);
     }
 
     await FlutterForegroundTask.startService(
