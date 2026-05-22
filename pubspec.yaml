@@ -17,6 +17,8 @@ dependencies:
   permission_handler: ^11.3.0
   # Rastreo en segundo plano (pantalla apagada / app cerrada)
   flutter_foreground_task: 8.17.0
+  # Leer el nivel de batería del celular
+  battery_plus: ^6.0.0
 
 flutter:
   uses-material-design: true

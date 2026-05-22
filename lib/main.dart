@@ -13,6 +13,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:battery_plus/battery_plus.dart';
 
 const supabaseUrl = 'https://ejvrvhdlweivrexcrivf.supabase.co';
 const supabaseAnonKey = 'sb_publishable_45nRA6haYBUpJNEzbAYObQ_fyjxO5Cm';
@@ -118,6 +119,14 @@ class MiTareaRastreo extends TaskHandler {
       }
 
       // ---- La posición pasó los filtros ----
+      // Leemos el nivel de batería del celular (0-100)
+      int? nivelBateria;
+      try {
+        nivelBateria = await Battery().batteryLevel;
+      } catch (_) {
+        nivelBateria = null; // si no se puede leer, lo dejamos vacío
+      }
+
       // Armamos el registro de esta posición
       final registro = {
         'company_id': _companyId,
@@ -126,6 +135,7 @@ class MiTareaRastreo extends TaskHandler {
         'latitud': pos.latitude,
         'longitud': pos.longitude,
         'velocidad': (pos.speed * 3.6).clamp(0, 300),
+        'bateria': nivelBateria,
         'fecha_gps': DateTime.now().toUtc().toIso8601String(),
       };
 
@@ -145,6 +155,7 @@ class MiTareaRastreo extends TaskHandler {
         await sb.from('tracker_devices').update({
           'online': true,
           'ultima_conexion': DateTime.now().toUtc().toIso8601String(),
+          'bateria': nivelBateria,
         }).eq('id', _deviceId!);
 
         _enviadas++;
@@ -372,6 +383,7 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
   String? _deviceId;
   String? _vehicleId;
   String? _companyId;
+  String _nombreDispositivo = '';
 
   @override
   void initState() {
@@ -414,26 +426,35 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
       setState(() => _estado = 'No se encontró tu perfil');
       return;
     }
+    _companyId = perfil['company_id'] as String;
 
-    final disp = await supabase
-        .from('tracker_devices')
-        .select('id, vehicle_id')
-        .eq('company_id', perfil['company_id'])
-        .eq('tipo', 'celular')
-        .limit(1)
-        .maybeSingle();
+    // ¿Ya eligió un vehículo antes? (lo recordamos en el celular)
+    final guardadoDeviceId = await FlutterForegroundTask.getData<String>(key: 'miDeviceId');
 
-    if (disp == null) {
-      setState(() => _estado = 'No hay un dispositivo celular cargado en el sistema.');
-      return;
+    if (guardadoDeviceId != null && guardadoDeviceId.isNotEmpty) {
+      // Ya tiene vehículo elegido: lo cargamos
+      final disp = await supabase
+          .from('tracker_devices')
+          .select('id, vehicle_id, nombre')
+          .eq('id', guardadoDeviceId)
+          .maybeSingle();
+      if (disp != null) {
+        setState(() {
+          _deviceId = disp['id'] as String;
+          _vehicleId = disp['vehicle_id'] as String?;
+          _nombreDispositivo = disp['nombre'] as String? ?? 'Mi vehículo';
+          _estado = _rastreando ? 'Rastreando en segundo plano' : 'Listo para empezar';
+        });
+        return;
+      }
     }
 
-    setState(() {
-      _companyId = perfil['company_id'] as String;
-      _deviceId = disp['id'] as String;
-      _vehicleId = disp['vehicle_id'] as String?;
-      _estado = _rastreando ? 'Rastreando en segundo plano' : 'Listo para empezar';
-    });
+    // No eligió todavía: mostramos la pantalla de selección
+    if (mounted) {
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => PantallaElegirVehiculo(companyId: _companyId!),
+      )).then((_) => _prepararDispositivo()); // al volver, recargamos
+    }
   }
 
   Future<void> _alternar() async {
@@ -523,6 +544,23 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
     setState(() { _rastreando = false; _estado = 'Detenido'; });
   }
 
+  // Cambiar de vehículo: borra la elección guardada y vuelve a preguntar
+  Future<void> _cambiarVehiculo() async {
+    if (_rastreando) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Detené el rastreo antes de cambiar de vehículo')),
+      );
+      return;
+    }
+    await FlutterForegroundTask.removeData(key: 'miDeviceId');
+    setState(() { _deviceId = null; _vehicleId = null; _nombreDispositivo = ''; });
+    if (mounted) {
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => PantallaElegirVehiculo(companyId: _companyId!),
+      )).then((_) => _prepararDispositivo());
+    }
+  }
+
   Future<void> _salir() async {
     await _detener();
     await supabase.auth.signOut();
@@ -540,6 +578,7 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
         backgroundColor: const Color(0xFF131822),
         title: const Text('BBNet Track', style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
+          IconButton(onPressed: _cambiarVehiculo, icon: const Icon(Icons.directions_car), tooltip: 'Cambiar vehículo'),
           IconButton(onPressed: _salir, icon: const Icon(Icons.logout), tooltip: 'Salir'),
         ],
       ),
@@ -568,6 +607,26 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
               ),
             ),
             const SizedBox(height: 28),
+            if (_nombreDispositivo.isNotEmpty) ...[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF131822),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: const Color(0xFF252d3d)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.directions_car, color: Color(0xFF4d9fff), size: 16),
+                    const SizedBox(width: 6),
+                    Text(_nombreDispositivo,
+                      style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
             Text(_estado,
               textAlign: TextAlign.center,
               style: const TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.w500)),
@@ -591,6 +650,107 @@ class _PantallaRastreoState extends State<PantallaRastreo> {
           ],
         ),
       ),
+    );
+  }
+}
+
+// ============================================================================
+// PANTALLA: ELEGIR VEHÍCULO
+// ----------------------------------------------------------------------------
+// Muestra los dispositivos (celular) de la empresa para que el chofer elija
+// cuál es el suyo. La elección se guarda y no se vuelve a preguntar.
+// ============================================================================
+class PantallaElegirVehiculo extends StatefulWidget {
+  final String companyId;
+  const PantallaElegirVehiculo({super.key, required this.companyId});
+
+  @override
+  State<PantallaElegirVehiculo> createState() => _PantallaElegirVehiculoState();
+}
+
+class _PantallaElegirVehiculoState extends State<PantallaElegirVehiculo> {
+  List<Map<String, dynamic>> _dispositivos = [];
+  bool _cargando = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _cargar();
+  }
+
+  Future<void> _cargar() async {
+    // Traemos los dispositivos celular de la empresa, con el nombre del vehículo
+    final data = await supabase
+        .from('tracker_devices')
+        .select('id, nombre, vehicle_id, vehicles(nombre)')
+        .eq('company_id', widget.companyId)
+        .eq('tipo', 'celular');
+    setState(() {
+      _dispositivos = List<Map<String, dynamic>>.from(data);
+      _cargando = false;
+    });
+  }
+
+  Future<void> _elegir(Map<String, dynamic> disp) async {
+    // Guardamos la elección en el celular (queda fija)
+    await FlutterForegroundTask.saveData(key: 'miDeviceId', value: disp['id'] as String);
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF131822),
+        title: const Text('Elegí tu vehículo', style: TextStyle(fontWeight: FontWeight.bold)),
+        automaticallyImplyLeading: false,
+      ),
+      body: _cargando
+          ? const Center(child: CircularProgressIndicator(color: Color(0xFF0066ff)))
+          : _dispositivos.isEmpty
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(28),
+                    child: Text(
+                      'No hay vehículos cargados todavía.\nPedile al administrador que cargue los dispositivos.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Color(0xFF8a93a6), fontSize: 15),
+                    ),
+                  ),
+                )
+              : ListView(
+                  padding: const EdgeInsets.all(20),
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 16, left: 4),
+                      child: Text('Tocá el vehículo que estás usando:',
+                        style: TextStyle(color: Color(0xFF8a93a6), fontSize: 14)),
+                    ),
+                    ..._dispositivos.map((disp) {
+                      final vehiculo = disp['vehicles'];
+                      final nombreVeh = vehiculo != null ? (vehiculo['nombre'] ?? '') : '';
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF131822),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFF252d3d)),
+                        ),
+                        child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+                          leading: const Icon(Icons.directions_car, color: Color(0xFF4d9fff), size: 30),
+                          title: Text(disp['nombre'] as String? ?? 'Dispositivo',
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 16)),
+                          subtitle: nombreVeh.isNotEmpty
+                              ? Text('Vehículo: $nombreVeh', style: const TextStyle(color: Color(0xFF8a93a6)))
+                              : null,
+                          trailing: const Icon(Icons.chevron_right, color: Color(0xFF8a93a6)),
+                          onTap: () => _elegir(disp),
+                        ),
+                      );
+                    }),
+                  ],
+                ),
     );
   }
 }
