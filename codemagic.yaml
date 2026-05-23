@@ -25,6 +25,8 @@ workflows:
           cp $CM_BUILD_DIR/pubspec.yaml base_temporal/pubspec.yaml
           # Copiamos nuestro AndroidManifest (con los permisos de GPS)
           cp $CM_BUILD_DIR/android/app/src/main/AndroidManifest.xml base_temporal/android/app/src/main/AndroidManifest.xml
+          # Copiamos NUESTROS íconos (el logo de la app) a la estructura generada
+          cp -r $CM_BUILD_DIR/android/app/src/main/res/mipmap-* base_temporal/android/app/src/main/res/
       - name: Bajar las librerías
         script: |
           cd ../base_temporal
