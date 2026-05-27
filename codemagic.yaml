@@ -13,7 +13,10 @@ workflows:
     name: BBNet Track Android
     max_build_duration: 60
     environment:
-      flutter: stable
+      # Fijamos una versión de Flutter PROBADA (en vez de "stable", que cambia y
+      # a veces trae plugins incompatibles). La 3.32.0 funciona bien con
+      # geolocator, supabase_flutter, flutter_foreground_task y battery_plus.
+      flutter: 3.32.0
     scripts:
       - name: Generar la estructura base de Android (la parte técnica)
         script: |
