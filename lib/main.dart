@@ -57,6 +57,19 @@ class MiTareaRastreo extends TaskHandler {
   static const double _velocidadMaxKmh = 150;     // descarta saltos imposibles (auto/camioneta)
   static const int _lecturasIgnorarInicio = 2;    // ignora las primeras 2 (arranque en frío)
 
+  // Filtro de MOVIMIENTO (idea: no llenar la base de ruido cuando está quieto):
+  // Solo se manda una posición si el vehículo se movió al menos esta distancia
+  // desde la última posición ENVIADA. Si está quieto, no se manda nada...
+  static const double _movimientoMinMetros = 50;  // metros mínimos para mandar
+  // ...PERO cada cierto tiempo se manda un "sigo vivo" aunque esté quieto, para
+  // saber que el teléfono sigue prendido (sino no se distingue "estacionado" de "apagado").
+  static const int _latidoMinutos = 10;           // cada cuánto manda "sigo vivo" si está quieto
+
+  // Última posición REALMENTE ENVIADA (para medir el movimiento) y cuándo
+  double? _ultEnvLat;
+  double? _ultEnvLon;
+  DateTime? _ultEnvHora;
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     // Al arrancar el servicio, leemos los datos guardados (device, empresa)
@@ -118,6 +131,24 @@ class MiTareaRastreo extends TaskHandler {
         }
       }
 
+      // ---- FILTRO DE MOVIMIENTO (la idea: solo mandar si se movió, o si toca latido) ----
+      // Miramos cuánto se movió desde la última posición ENVIADA y hace cuánto fue.
+      if (_ultEnvLat != null && _ultEnvLon != null && _ultEnvHora != null) {
+        final movido = Geolocator.distanceBetween(
+          _ultEnvLat!, _ultEnvLon!, pos.latitude, pos.longitude,
+        );
+        final minutosDesdeUltimo = DateTime.now().difference(_ultEnvHora!).inMinutes;
+
+        // Si NO se movió lo suficiente Y todavía no toca el "sigo vivo", no mandamos.
+        if (movido < _movimientoMinMetros && minutosDesdeUltimo < _latidoMinutos) {
+          FlutterForegroundTask.updateService(
+            notificationTitle: 'BBNet Track · Detenido',
+            notificationText: 'Vehículo quieto · ahorrando batería',
+          );
+          return; // quieto: no mandamos nada (no ensuciamos el mapa ni gastamos datos)
+        }
+      }
+
       // ---- La posición pasó los filtros ----
       // Leemos el nivel de batería del celular (0-100)
       int? nivelBateria;
@@ -157,6 +188,11 @@ class MiTareaRastreo extends TaskHandler {
           'ultima_conexion': DateTime.now().toUtc().toIso8601String(),
           'bateria': nivelBateria,
         }).eq('id', _deviceId!);
+
+        // Guardamos esta como la última REALMENTE enviada (para medir el movimiento)
+        _ultEnvLat = pos.latitude;
+        _ultEnvLon = pos.longitude;
+        _ultEnvHora = DateTime.now();
 
         _enviadas++;
         FlutterForegroundTask.updateService(
